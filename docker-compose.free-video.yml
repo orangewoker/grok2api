@@ -1,0 +1,26 @@
+name: grok2api-free-video-20269
+
+services:
+  grok2api-free-video:
+    container_name: grok2api-free-video-20269
+    image: "${GROK2API_IMAGE:-ghcr.io/orangewoker/grok2api:latest}"
+    ports:
+      - "${GROK2API_PORT:-20269}:8000"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      # 非空时覆盖 config.yaml 的 PostgreSQL DSN，并自动启用 postgres。
+      GROK2API_DATABASE_URL: "${GROK2API_DATABASE_URL:-}"
+      GROK2API_QUALITY_GUARD_DIR: /var/lib/grok2api-quality-guard
+    volumes:
+      - "${GROK2API_CONFIG:-./config.yaml}:/run/grok2api/config.yaml:ro"
+      - grok2api-free-video-20269-data:/app/data
+      - grok2api-free-video-20269-quality-guard:/var/lib/grok2api-quality-guard
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  grok2api-free-video-20269-data:
+  grok2api-free-video-20269-quality-guard:

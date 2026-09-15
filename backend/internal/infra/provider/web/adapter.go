@@ -140,21 +140,14 @@ func (a *Adapter) TierOrder(upstreamModel string) []account.WebTier {
 }
 
 func (a *Adapter) TierOrderForQuotaMode(upstreamModel, quotaMode string) []account.WebTier {
-	order := a.TierOrder(upstreamModel)
-	spec, ok := Resolve(upstreamModel)
-	if !ok || spec.Capability != modeldomain.CapabilityVideo || quotaMode == account.QuotaModeWebVideo720p {
-		return order
-	}
-	// Basic video entitlement is currently confirmed only for the default
-	// 720p product. Other video quota products remain on paid Web tiers until
-	// independently verified upstream.
-	filtered := make([]account.WebTier, 0, len(order))
-	for _, tier := range order {
-		if tier != account.WebTierBasic {
-			filtered = append(filtered, tier)
-		}
-	}
-	return filtered
+	// The Web Imagine quota endpoint exposes separate `video` (480p) and
+	// `video720p` products.  Both products are available to Basic/free
+	// accounts; the upstream UI currently permits a free account to generate
+	// 480p/6s videos.  Keep the tier order aligned with the catalog for both
+	// quota modes so a Basic account is not rejected before the request reaches
+	// Grok.  The account's product-specific quota window still determines
+	// whether it is schedulable.
+	return a.TierOrder(upstreamModel)
 }
 
 func (a *Adapter) PricingModel(upstreamModel string) string {
