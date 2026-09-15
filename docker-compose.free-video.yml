@@ -4,6 +4,7 @@ services:
   grok2api-free-video:
     container_name: grok2api-free-video-20269
     image: "${GROK2API_IMAGE:-ghcr.io/orangewoker/grok2api:latest}"
+    pull_policy: always
     ports:
       - "${GROK2API_PORT:-20269}:8000"
     environment:
@@ -18,6 +19,24 @@ services:
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    security_opt:
+      - no-new-privileges:true
+
+  # 自动跟踪 GHCR 的 latest 镜像并在有新摘要时重启上面的服务。
+  watchtower:
+    container_name: grok2api-free-video-20269-watchtower
+    image: containrrr/watchtower:latest
+    command:
+      - --label-enable
+      - --interval=300
+      - --cleanup
+      - --rolling-restart
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    init: true
     security_opt:
       - no-new-privileges:true
 
