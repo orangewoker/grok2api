@@ -179,3 +179,17 @@ qualityGuard:
     idleAccountCooldown: 15m
     minEncryptedBytes: 256
     encryptedBytesPerReasoningToken: 4
+
+# [按需修改] Grok Build 上游协议指纹。通常保持注释状态，使用内置推荐值；
+# 这些字段也可在管理端「运行设置 → Grok Build」热更新。
+# provider:
+#   build:
+#     # 上游对 Grok CLI 版本有最低要求。低于该版本时 xAI 会对每个请求返回
+#     # HTTP 426「Your Grok CLI version (...) is outdated」，与账号等级（含
+#     # Heavy）或 OAuth 导入方式无关。当前最低要求为 1.0.13，推荐使用 1.0.40。
+#     # 低于最低要求的取值会在启动与热更新时自动提升到推荐版本，避免旧数据库中
+#     # 的历史取值让整个账号池持续 426。
+#     clientVersion: "1.0.40"
+#     clientIdentifier: "grok-shell"
+#     tokenAuth: "xai-grok-cli"
+#     userAgent: "grok-shell/1.0.40 (linux; x86_64)"

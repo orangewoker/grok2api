@@ -296,11 +296,13 @@ func TestDefaultGrokBuildClientVersionMatchesLocalBaseline(t *testing.T) {
 }
 
 func TestLoadKeepsExplicitGrokBuildClientFingerprint(t *testing.T) {
+	// An explicit fingerprint that already satisfies the upstream floor must be
+	// preserved verbatim.
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte(`provider:
   build:
-    clientVersion: "0.2.111"
-    userAgent: "grok-shell/0.2.111 (linux; x86_64)"
+    clientVersion: "1.0.27"
+    userAgent: "grok-shell/1.0.27 (linux; x86_64)"
 secrets:
   jwtSecret: "12345678901234567890123456789012"
   credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -312,8 +314,76 @@ secrets:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider.Build.ClientVersion != "0.2.111" || cfg.Provider.Build.UserAgent != "grok-shell/0.2.111 (linux; x86_64)" {
+	if cfg.Provider.Build.ClientVersion != "1.0.27" || cfg.Provider.Build.UserAgent != "grok-shell/1.0.27 (linux; x86_64)" {
 		t.Fatalf("explicit Build fingerprint was overwritten: %#v", cfg.Provider.Build)
+	}
+}
+
+func TestNormalizeBuildClientVersionRaisesOutdatedValues(t *testing.T) {
+	// The exact regression reported against v3.1.6: a stale Build client
+	// version is rejected by the upstream with HTTP 426.
+	for _, stale := range []string{"1.0.4", "0.2.111", "1.0.12", "0.9.9"} {
+		if !BuildClientVersionOutdated(stale) {
+			t.Fatalf("version %q should be reported as outdated", stale)
+		}
+		if got := NormalizeBuildClientVersion(stale); got != RecommendedBuildClientVersion {
+			t.Fatalf("normalize(%q) = %q, want %q", stale, got, RecommendedBuildClientVersion)
+		}
+	}
+}
+
+func TestNormalizeBuildClientVersionKeepsAcceptableValues(t *testing.T) {
+	// Anything at or above the upstream floor is preserved exactly. That
+	// includes versions older than the recommended baseline, because pinning a
+	// working version is a deliberate operator decision.
+	for _, acceptable := range []string{"1.0.13", "1.0.27", "1.0.40", "1.1", "2.0.0"} {
+		if BuildClientVersionOutdated(acceptable) {
+			t.Fatalf("version %q must not be reported as outdated", acceptable)
+		}
+		if got := NormalizeBuildClientVersion(acceptable); got != acceptable {
+			t.Fatalf("normalize(%q) = %q, want it preserved", acceptable, got)
+		}
+	}
+	// Unparseable values are preserved rather than silently rewritten, so a
+	// custom build target is never clobbered.
+	for _, custom := range []string{"custom-build", "1.0.40-rc1"} {
+		if BuildClientVersionOutdated(custom) {
+			t.Fatalf("unparseable version %q must not be reported as outdated", custom)
+		}
+		if got := NormalizeBuildClientVersion(custom); got != custom {
+			t.Fatalf("normalize(%q) = %q, want it preserved", custom, got)
+		}
+	}
+	if got := NormalizeBuildClientVersion("  "); got != RecommendedBuildClientVersion {
+		t.Fatalf("normalize(blank) = %q, want %q", got, RecommendedBuildClientVersion)
+	}
+}
+
+func TestMinimumBuildClientVersionMatchesUpstreamFloor(t *testing.T) {
+	// xAI rejects versions below 1.0.13 with HTTP 426.
+	if MinimumBuildClientVersion != "1.0.13" {
+		t.Fatalf("minimum client version = %q", MinimumBuildClientVersion)
+	}
+	if order, ok := compareClientVersions(RecommendedBuildClientVersion, MinimumBuildClientVersion); !ok || order < 0 {
+		t.Fatalf("recommended version %q must not be below the floor %q", RecommendedBuildClientVersion, MinimumBuildClientVersion)
+	}
+}
+
+func TestLoadRejectsOutdatedGrokBuildClientVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`provider:
+  build:
+    clientVersion: "1.0.4"
+    userAgent: "grok-shell/1.0.4 (linux; x86_64)"
+secrets:
+  jwtSecret: "12345678901234567890123456789012"
+  credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("an outdated Build client version must be rejected at load time")
 	}
 }
 

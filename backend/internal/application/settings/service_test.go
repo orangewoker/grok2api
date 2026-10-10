@@ -413,6 +413,40 @@ func TestLoadPersistedKeepsClearanceDefaultsForOlderPayload(t *testing.T) {
 	}
 }
 
+// TestLoadPersistedRepairsOutdatedBuildClientVersion covers the reported
+// regression: a runtime settings row written by an older release pins a Build
+// client version that the upstream rejects with HTTP 426. Startup must repair
+// it, otherwise every request fails regardless of account health.
+func TestLoadPersistedRepairsOutdatedBuildClientVersion(t *testing.T) {
+	cfg := testConfig(t)
+	value := toDomainConfig(cfg)
+	value.ProviderBuild.ClientVersion = "1.0.4"
+	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
+	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Provider.Build.ClientVersion; got != config.RecommendedBuildClientVersion {
+		t.Fatalf("client version = %q, want %q", got, config.RecommendedBuildClientVersion)
+	}
+}
+
+// TestUpdateRepairsOutdatedBuildClientVersion ensures the admin API cannot
+// persist a version that the upstream version gate would reject.
+func TestUpdateRepairsOutdatedBuildClientVersion(t *testing.T) {
+	repository := &runtimeSettingsRepositoryStub{}
+	service := NewService(testConfig(t), time.Time{}, 0, repository, nil, nil)
+	input := service.Get().Config
+	input.ProviderBuild.ClientVersion = "1.0.4"
+	snapshot, err := service.Update(context.Background(), service.Get().Revision, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Config.ProviderBuild.ClientVersion; got != config.RecommendedBuildClientVersion {
+		t.Fatalf("client version = %q, want %q", got, config.RecommendedBuildClientVersion)
+	}
+}
+
 func TestSnapshotIncludesRecommendedBuildBaseline(t *testing.T) {
 	service := NewService(testConfig(t), time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, nil)
 	recommended := service.Get().RecommendedProviderBuild

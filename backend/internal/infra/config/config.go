@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,7 +31,14 @@ const (
 	DefaultStatsigSignerURL       = "https://grok.wodf.de/sign"
 	DefaultFlareSolverrURL        = "http://flaresolverr:8191"
 	RecommendedBuildClientVersion = "1.0.40"
-	RecommendedBuildUserAgent     = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
+
+	// MinimumBuildClientVersion is the lowest Grok CLI version the Build
+	// upstream still accepts. Requests below this floor are rejected by xAI
+	// with HTTP 426 and "Your Grok CLI version (...) is outdated", so a stale
+	// value must never leave the gateway.
+	MinimumBuildClientVersion = "1.0.13"
+
+	RecommendedBuildUserAgent = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
 
 	maxServerBodyBytes     = 256 << 20
 	maxRequestTimeout      = 24 * time.Hour
@@ -598,6 +606,12 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Provider.Build.ClientVersion) == "" || strings.TrimSpace(c.Provider.Build.ClientIdentifier) == "" || strings.TrimSpace(c.Provider.Build.TokenAuth) == "" || strings.TrimSpace(c.Provider.Build.UserAgent) == "" {
 		return errors.New("provider.build 客户端标识不能为空")
 	}
+	// A version below the upstream floor makes every Build request fail with
+	// HTTP 426 ("Your Grok CLI version is outdated"), so reject it early with
+	// an actionable message instead of surfacing a 426 at inference time.
+	if BuildClientVersionOutdated(c.Provider.Build.ClientVersion) {
+		return fmt.Errorf("provider.build.clientVersion %q 低于上游最低要求 %s，会触发 426 版本过低；请改为 %s", strings.TrimSpace(c.Provider.Build.ClientVersion), MinimumBuildClientVersion, RecommendedBuildClientVersion)
+	}
 	if timeout := c.Provider.Build.ResponseHeaderTimeout.Value(); timeout < settingsdomain.MinBuildResponseHeaderTimeout || timeout > settingsdomain.MaxBuildResponseHeaderTimeout {
 		return errors.New("Grok Build 响应头超时必须在 30 秒到 30 分钟之间")
 	}
@@ -897,7 +911,7 @@ func defaultConfig() Config {
 		Provider: ProviderConfig{
 			Build: BuildProviderConfig{
 				BaseURL: "https://cli-chat-proxy.grok.com/v1", FallbackBaseURL: DefaultBuildFallbackBaseURL,
-				ClientVersion: RecommendedBuildClientVersion, ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli",
+				ClientVersion: NormalizeBuildClientVersion(RecommendedBuildClientVersion), ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli",
 				UserAgent: RecommendedBuildUserAgent, ResponseHeaderTimeout: Duration(settingsdomain.DefaultBuildResponseHeaderTimeout),
 				StreamIdleTimeout: Duration(settingsdomain.DefaultBuildStreamIdleTimeout),
 			},
@@ -1000,4 +1014,107 @@ func isExampleSecret(value string) bool {
 	default:
 		return false
 	}
+}
+
+// parseClientVersion splits a Grok CLI version such as "1.0.40" or "1.2" into
+// numeric components. It returns false for empty, non-numeric, or pre-release
+// strings so callers can fall back instead of comparing garbage.
+func parseClientVersion(raw string) ([]int, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, false
+	}
+	// Official versions are plain dotted numbers. Anything carrying a suffix
+	// (e.g. "1.0.40-rc1") is not comparable here.
+	if strings.ContainsAny(value, "-+") {
+		return nil, false
+	}
+	parts := strings.Split(value, ".")
+	components := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, false
+		}
+		number, err := strconv.Atoi(part)
+		if err != nil || number < 0 {
+			return nil, false
+		}
+		components = append(components, number)
+	}
+	if len(components) == 0 {
+		return nil, false
+	}
+	return components, true
+}
+
+// compareClientVersions orders two dotted numeric versions. Missing trailing
+// components count as zero, so "1.1" equals "1.1.0" and precedes "1.1.1".
+func compareClientVersions(left, right string) (int, bool) {
+	leftParts, leftOK := parseClientVersion(left)
+	rightParts, rightOK := parseClientVersion(right)
+	if !leftOK || !rightOK {
+		return 0, false
+	}
+	length := len(leftParts)
+	if len(rightParts) > length {
+		length = len(rightParts)
+	}
+	for index := 0; index < length; index++ {
+		var leftValue, rightValue int
+		if index < len(leftParts) {
+			leftValue = leftParts[index]
+		}
+		if index < len(rightParts) {
+			rightValue = rightParts[index]
+		}
+		switch {
+		case leftValue < rightValue:
+			return -1, true
+		case leftValue > rightValue:
+			return 1, true
+		}
+	}
+	return 0, true
+}
+
+// BuildClientVersionOutdated reports whether the configured Build client
+// version is provably below the upstream floor. The Build upstream answers such
+// requests with HTTP 426 and "Your Grok CLI version is outdated". Versions that
+// cannot be parsed are not reported as outdated: an operator may deliberately
+// target a custom build, and guessing would break those deployments.
+func BuildClientVersionOutdated(raw string) bool {
+	order, ok := compareClientVersions(raw, MinimumBuildClientVersion)
+	return ok && order < 0
+}
+
+// NormalizeBuildClientVersion repairs a Build client version that the upstream
+// version gate would reject outright.
+//
+// The value is hot-reloadable and persisted in runtime settings, so a database
+// written by an older release can keep sending an obsolete version forever:
+// every request then fails with 426 regardless of account health, and a newly
+// imported OAuth account inherits the same failure. Values below the upstream
+// floor are therefore raised to the recommended baseline, and a blank value
+// falls back to it as well.
+//
+// A version at or above the floor is returned unchanged. Operators may pin a
+// working version that is older than the recommended baseline, and silently
+// rewriting that choice would override a deliberate deployment decision.
+// Unparseable values are likewise preserved verbatim.
+func NormalizeBuildClientVersion(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return RecommendedBuildClientVersion
+	}
+	if !BuildClientVersionOutdated(value) {
+		return value
+	}
+	// Only values proven to be below the floor are rewritten. Prefer the
+	// recommended baseline, but never emit anything the floor still rejects.
+	replacement := RecommendedBuildClientVersion
+	if BuildClientVersionOutdated(replacement) {
+		replacement = MinimumBuildClientVersion
+	}
+	return replacement
 }

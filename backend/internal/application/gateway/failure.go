@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 )
@@ -177,6 +178,17 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 		failure.FreeQuotaExhausted = isFreeQuotaExhaustion(metadataText)
 		failure.ModelQuotaExhausted = isModelQuotaExhaustion(metadataText)
 		failure.QuotaExhausted = failure.FreeQuotaExhausted || isPaidQuotaExhaustion(metadataText)
+	case http.StatusUpgradeRequired:
+		// xAI raises the minimum accepted Grok CLI version over time and answers
+		// older clients with 426 ("Your Grok CLI version (x.y.z) is outdated").
+		// This is a gateway configuration fault, not an account fault: rotating
+		// accounts cannot help, so the failure must not be account-scoped and
+		// the message must name the actionable fix.
+		failure.Code = "upstream_client_outdated"
+		failure.PublicMessage = "上游要求更新 Grok Build 客户端版本，请将 provider.build.clientVersion 调整为不低于 " + config.MinimumBuildClientVersion
+		if upstreamMessage != "" {
+			failure.PublicMessage = upstreamMessage
+		}
 	default:
 		if status >= 400 && status < 500 {
 			failure.Code = "upstream_error"

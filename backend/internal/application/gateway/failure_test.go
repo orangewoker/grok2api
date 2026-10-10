@@ -57,6 +57,28 @@ func TestTransportUpstreamFailureClassifiesResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestHTTPUpstreamFailureClassifiesOutdatedBuildClient(t *testing.T) {
+	// The exact upstream rejection reported for v3.1.6 importing a heavy OAuth
+	// account: xAI answers the outbound Build request with HTTP 426.
+	body := []byte(`{"error":"Your Grok CLI version (1.0.4) is outdated. Please update to version 1.0.13 or later via grok update or the installation documentation."}`)
+	failure := newHTTPUpstreamFailure(http.StatusUpgradeRequired, body, 42, "build-heavy")
+	if failure.Code != "upstream_client_outdated" {
+		t.Fatalf("code = %q, want upstream_client_outdated", failure.Code)
+	}
+	// The version gate is a gateway configuration fault. Marking it account
+	// scoped would rotate through the entire pool and cool every account for a
+	// condition no account can fix.
+	if failure.AccountScoped {
+		t.Fatal("an outdated client version must not be account scoped")
+	}
+	if failure.CredentialRejected || failure.AccountBlocked || failure.QuotaExhausted {
+		t.Fatalf("a version gate must not be treated as an account fault: %#v", failure)
+	}
+	if !strings.Contains(failure.PublicMessage, "outdated") {
+		t.Fatalf("public message = %q, want the upstream explanation", failure.PublicMessage)
+	}
+}
+
 func TestHTTPUpstreamFailureClassifiesBuildForbiddenBodies(t *testing.T) {
 	tests := []struct {
 		name                   string

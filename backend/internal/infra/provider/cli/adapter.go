@@ -26,6 +26,7 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
+	infraconfig "github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
@@ -1112,7 +1113,11 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 	cfg := a.config()
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("X-XAI-Token-Auth", cfg.TokenAuth)
-	req.Header.Set("x-grok-client-version", cfg.ClientVersion)
+	// Final guard against the upstream version gate: a version below xAI's floor
+	// makes every Build request fail with HTTP 426 ("Your Grok CLI version is
+	// outdated") for every account, including freshly imported OAuth accounts.
+	// Normalizing here keeps that guarantee even if a value bypassed settings.
+	req.Header.Set("x-grok-client-version", infraconfig.NormalizeBuildClientVersion(cfg.ClientVersion))
 	req.Header.Set("x-grok-client-identifier", cfg.ClientIdentifier)
 	req.Header.Set("x-grok-client-mode", "headless")
 
