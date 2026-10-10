@@ -34,6 +34,9 @@ type ProviderBuildConfig struct {
 type ProviderBuildRecommendation struct {
 	ClientVersion string
 	UserAgent     string
+	// MinimumVersion 是当前生效的上游版本底线。它等于编译内置底线，或由运行时
+	// 收到 426 后自动学习到的更高版本，用于在管理端解释自动更新行为。
+	MinimumVersion string
 }
 
 type ProviderWebConfig struct {
@@ -526,8 +529,9 @@ func (s *Service) snapshotLocked() Snapshot {
 	return Snapshot{
 		Config: toEditable(s.cfg),
 		RecommendedProviderBuild: ProviderBuildRecommendation{
-			ClientVersion: config.RecommendedBuildClientVersion,
-			UserAgent:     config.RecommendedBuildUserAgent,
+			ClientVersion:  config.RecommendedBuildClientVersion,
+			UserAgent:      config.RecommendedBuildUserAgent,
+			MinimumVersion: config.ObservedBuildVersionFloor(),
 		},
 		UpdatedAt: s.updatedAt, Revision: s.revision, RestartRequired: restartRequired,
 	}

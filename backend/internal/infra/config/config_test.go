@@ -359,6 +359,94 @@ func TestNormalizeBuildClientVersionKeepsAcceptableValues(t *testing.T) {
 	}
 }
 
+func TestOutdatedBuildVersionFromErrorParsesUpstreamMessages(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "reported 426 body",
+			body: `{"error":"Your Grok CLI version (1.0.4) is outdated. Please update to version 1.0.13 or later via grok update or the installation documentation."}`,
+			want: "1.0.13",
+		},
+		{
+			name: "plain text phrasing",
+			body: `Your Grok CLI version (0.9.1) is outdated. Please update to version 2.3.4`,
+			want: "2.3.4",
+		},
+		{
+			name: "prefixed version token",
+			body: `Your Grok CLI version (0.9.1) is outdated. Please update to version v1.7.2 or later`,
+			want: "1.7.2",
+		},
+		{
+			name: "hint without the outdated marker is still trusted",
+			body: `please update to version 1.7.2`,
+			want: "1.7.2",
+		},
+		{
+			name: "bare version without any version-gate marker is refused",
+			body: `some unrelated failure mentioning 1.7.2`,
+			want: "",
+		},
+		{
+			name: "unrelated error is ignored",
+			body: `{"error":"upstream policy rejected request"}`,
+			want: "",
+		},
+		{
+			name: "empty body",
+			body: ``,
+			want: "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := OutdatedBuildVersionFromError(test.body); got != test.want {
+				t.Fatalf("OutdatedBuildVersionFromError = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestObservedFloorOnlyMovesUpward(t *testing.T) {
+	// The learned floor is process-wide; restoring it is unnecessary because
+	// this is the only test in the package that raises it, and raising it never
+	// regresses previously accepted versions.
+	baseline := ObservedBuildVersionFloor()
+
+	if _, ok := SetObservedBuildVersionFloor("garbage"); ok {
+		t.Fatal("an unparseable version must not raise the floor")
+	}
+	if _, ok := SetObservedBuildVersionFloor(""); ok {
+		t.Fatal("an empty version must not raise the floor")
+	}
+	// A downgrade suggestion must never weaken the gate.
+	if _, ok := SetObservedBuildVersionFloor("0.0.1"); ok {
+		t.Fatal("a lower version must not raise the floor")
+	}
+	if _, ok := SetObservedBuildVersionFloor(baseline); ok {
+		t.Fatal("an equal version must not count as a raise")
+	}
+
+	const raised = "9.9.9"
+	if _, ok := SetObservedBuildVersionFloor(raised); !ok {
+		t.Fatal("a newer version must raise the floor")
+	}
+	if got := ObservedBuildVersionFloor(); got != raised {
+		t.Fatalf("floor = %q, want %q", got, raised)
+	}
+	// Once raised, the previous recommended baseline is genuinely outdated.
+	if !BuildClientVersionOutdated(RecommendedBuildClientVersion) {
+		t.Fatalf("%q should be outdated once the floor moved to %q", RecommendedBuildClientVersion, raised)
+	}
+	// The request path must emit the learned floor rather than the stale value.
+	if got := SanitizeBuildVersionForFloor(RecommendedBuildClientVersion); got != raised {
+		t.Fatalf("SanitizeBuildVersionForFloor = %q, want %q", got, raised)
+	}
+}
+
 func TestMinimumBuildClientVersionMatchesUpstreamFloor(t *testing.T) {
 	// xAI rejects versions below 1.0.13 with HTTP 426.
 	if MinimumBuildClientVersion != "1.0.13" {

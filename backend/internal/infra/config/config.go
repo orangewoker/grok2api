@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
@@ -1079,13 +1080,14 @@ func compareClientVersions(left, right string) (int, bool) {
 }
 
 // BuildClientVersionOutdated reports whether the configured Build client
-// version is provably below the upstream floor. The Build upstream answers such
-// requests with HTTP 426 and "Your Grok CLI version is outdated". Versions that
-// cannot be parsed are not reported as outdated: an operator may deliberately
-// target a custom build, and guessing would break those deployments.
+// version is provably below the effective upstream floor (the compiled-in
+// minimum, raised by any floor observed at runtime). The Build upstream answers
+// such requests with HTTP 426 and "Your Grok CLI version is outdated". Versions
+// that cannot be parsed are not reported as outdated: an operator may
+// deliberately target a custom build, and guessing would break those
+// deployments.
 func BuildClientVersionOutdated(raw string) bool {
-	order, ok := compareClientVersions(raw, MinimumBuildClientVersion)
-	return ok && order < 0
+	return BuildClientVersionOutdatedFor(raw, effectiveBuildVersionFloor())
 }
 
 // NormalizeBuildClientVersion repairs a Build client version that the upstream
@@ -1114,7 +1116,116 @@ func NormalizeBuildClientVersion(raw string) string {
 	// recommended baseline, but never emit anything the floor still rejects.
 	replacement := RecommendedBuildClientVersion
 	if BuildClientVersionOutdated(replacement) {
-		replacement = MinimumBuildClientVersion
+		replacement = effectiveBuildVersionFloor()
 	}
 	return replacement
+}
+
+// buildVersionFloorOverride holds a floor learned from a live upstream 426.
+// It is process-wide because the version gate is a property of the upstream,
+// not of any single account or request.
+var buildVersionFloorOverride atomic.Value // string
+
+// SetObservedBuildVersionFloor records a minimum version reported by the
+// upstream. It only ever moves the effective floor upward and only accepts a
+// parseable version newer than the compiled-in floor, so a malformed or
+// downgrade suggestion can never weaken the gate.
+//
+// This is what lets a deployment recover on its own when xAI raises the
+// requirement again: the gateway learns the new floor from the 426 body and
+// retries with it, without waiting for a new release.
+func SetObservedBuildVersionFloor(raw string) (string, bool) {
+	candidate := strings.TrimSpace(raw)
+	if _, ok := parseClientVersion(candidate); !ok {
+		return "", false
+	}
+	current := effectiveBuildVersionFloor()
+	if order, ok := compareClientVersions(candidate, current); !ok || order <= 0 {
+		return "", false
+	}
+	buildVersionFloorOverride.Store(candidate)
+	return candidate, true
+}
+
+// effectiveBuildVersionFloor returns the highest floor currently known to this
+// process: the compiled-in minimum, raised by any floor observed at runtime.
+func effectiveBuildVersionFloor() string {
+	floor := MinimumBuildClientVersion
+	if observed, ok := buildVersionFloorOverride.Load().(string); ok && observed != "" {
+		if order, cmpOK := compareClientVersions(observed, floor); cmpOK && order > 0 {
+			return observed
+		}
+	}
+	return floor
+}
+
+// ObservedBuildVersionFloor reports the floor in force for this process. It is
+// exposed for diagnostics and for the settings recommendation shown to admins.
+func ObservedBuildVersionFloor() string { return effectiveBuildVersionFloor() }
+
+// BuildClientVersionOutdatedFor reports whether raw is below the given floor.
+// An unparseable floor or version is treated as acceptable so that custom build
+// targets are never flagged by accident.
+func BuildClientVersionOutdatedFor(raw, floor string) bool {
+	order, ok := compareClientVersions(raw, floor)
+	return ok && order < 0
+}
+
+// OutdatedBuildVersionFromError extracts the minimum acceptable version from an
+// upstream 426 body such as:
+//
+//	Your Grok CLI version (1.0.4) is outdated. Please update to version 1.0.13
+//	or later via grok update or the installation documentation.
+//
+// It returns the version the upstream asks for, so the caller can raise the
+// floor and retry instead of failing the request outright. Only the explicit
+// "update to version X" clause is trusted; the current-version parenthesis is
+// used as a fallback so an unknown phrasing still recovers.
+func OutdatedBuildVersionFromError(body string) string {
+	lowered := strings.ToLower(body)
+	// The explicit "update to version X" clause is the strongest signal, so it
+	// is trusted even when the surrounding wording differs from today's.
+	if match := buildVersionUpdateHintPattern.FindStringSubmatch(body); len(match) > 1 {
+		return strings.TrimSpace(match[1])
+	}
+	// Everything below relies on the message being the version-gate rejection,
+	// so require the marker before trusting a bare version token.
+	if !strings.Contains(lowered, "outdated") {
+		return ""
+	}
+	for _, pattern := range []*regexp.Regexp{buildVersionCurrentPattern, buildVersionBarePattern} {
+		if match := pattern.FindStringSubmatch(body); len(match) > 1 {
+			return strings.TrimSpace(match[1])
+		}
+	}
+	return ""
+}
+
+var (
+	// "update to version 1.0.13 or later" / "update to 1.0.13"
+	buildVersionUpdateHintPattern = regexp.MustCompile(`(?i)update\s+to\s+(?:version\s+)?v?(\d+(?:\.\d+)+)`)
+	// "Your Grok CLI version (1.0.4) is outdated"
+	buildVersionCurrentPattern = regexp.MustCompile(`(?i)version\s*\(?\s*v?(\d+(?:\.\d+)+)\s*\)?\s*is\s+outdated`)
+	// Any leading dotted version in an outdated message, as a last resort.
+	buildVersionBarePattern = regexp.MustCompile(`(\d+\.\d+(?:\.\d+)?)`)
+)
+
+// SanitizeBuildVersionForFloor rewrites a configured version that no longer
+// satisfies the effective floor, raising it to the most recent known-good
+// value. It is used on the request path so a freshly learned floor takes effect
+// immediately.
+func SanitizeBuildVersionForFloor(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return RecommendedBuildClientVersion
+	}
+	if !BuildClientVersionOutdatedFor(value, effectiveBuildVersionFloor()) {
+		return value
+	}
+	for _, candidate := range []string{RecommendedBuildClientVersion, effectiveBuildVersionFloor()} {
+		if !BuildClientVersionOutdatedFor(candidate, effectiveBuildVersionFloor()) {
+			return candidate
+		}
+	}
+	return effectiveBuildVersionFloor()
 }

@@ -343,6 +343,11 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if err := normalizeGzipResponse(call.response); err != nil {
 		return nil, err
 	}
+	// Self-heal the upstream version gate. xAI raises the minimum accepted Grok
+	// CLI version over time and answers older clients with 426. The response
+	// names the version it wants, so learn that floor and retry once instead of
+	// failing every request until a new image is released.
+	call = a.retryOutdatedClientVersion(ctx, request, accessToken, body, base, call)
 	call, reasoningRecovery, recoveryErr := a.recoverReasoningDecodeFailure(ctx, request, accessToken, body, base, replayKey, call)
 	if recoveryErr != nil {
 		return nil, recoveryErr
@@ -588,6 +593,60 @@ type responseCall struct {
 	startedAt   time.Time
 	durationMS  int64
 	err         error
+}
+
+// retryOutdatedClientVersion self-heals the upstream Grok CLI version gate.
+//
+// xAI raises the minimum accepted client version over time. When the request
+// carries a version the upstream has retired, it answers HTTP 426 with a body
+// that names the version it now wants. The gateway learns that floor, rewrites
+// its outbound version, and retries once. Without this, every request fails
+// until a new image is published, which is exactly the reported failure mode.
+//
+// The buffered 426 body is replayed unchanged if the learned version is not
+// actually accepted, so the caller still sees a truthful upstream error and no
+// second request is issued for the same stale floor.
+func (a *Adapter) retryOutdatedClientVersion(ctx context.Context, request provider.ResponseResourceRequest, accessToken string, body []byte, base string, call responseCall) responseCall {
+	if call.err != nil || call.response == nil || call.response.StatusCode != http.StatusUpgradeRequired {
+		return call
+	}
+	diagnosticBody, truncated, readErr := provider.ReadDiagnosticBody(call.response.Body)
+	_ = call.response.Body.Close()
+	if readErr != nil {
+		return call
+	}
+	buffered := cloneBufferedResponse(call.response, diagnosticBody, truncated)
+
+	required := infraconfig.OutdatedBuildVersionFromError(string(diagnosticBody))
+	if required == "" {
+		call.response = buffered
+		return call
+	}
+	// Only an upward move is accepted, so a malformed or hostile body can never
+	// lower the floor or cause unbounded retries.
+	if _, learned := infraconfig.SetObservedBuildVersionFloor(required); !learned {
+		call.response = buffered
+		return call
+	}
+	a.logger.Warn("build_client_version_auto_updated", "required", required, "floor", infraconfig.ObservedBuildVersionFloor())
+
+	retried := a.doResponseRequest(ctx, request, accessToken, body, base)
+	if retried.err != nil {
+		call.response = buffered
+		return call
+	}
+	if err := normalizeGzipResponse(retried.response); err != nil {
+		call.response = buffered
+		return call
+	}
+	if retried.response.StatusCode == http.StatusUpgradeRequired {
+		// The learned version was still rejected; surface the original body and
+		// keep the raised floor so later requests do not repeat the stale value.
+		_ = retried.response.Body.Close()
+		call.response = buffered
+		return call
+	}
+	return retried
 }
 
 // doResponseRequest 发起一次真实 Responses 上游调用，并保留该次调用自己的审计来源信息。
@@ -1116,8 +1175,10 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 	// Final guard against the upstream version gate: a version below xAI's floor
 	// makes every Build request fail with HTTP 426 ("Your Grok CLI version is
 	// outdated") for every account, including freshly imported OAuth accounts.
-	// Normalizing here keeps that guarantee even if a value bypassed settings.
-	req.Header.Set("x-grok-client-version", infraconfig.NormalizeBuildClientVersion(cfg.ClientVersion))
+	// Normalizing here keeps that guarantee even if a value bypassed settings,
+	// and it honors any floor learned from a live 426 so the new requirement
+	// takes effect immediately.
+	req.Header.Set("x-grok-client-version", infraconfig.SanitizeBuildVersionForFloor(cfg.ClientVersion))
 	req.Header.Set("x-grok-client-identifier", cfg.ClientIdentifier)
 	req.Header.Set("x-grok-client-mode", "headless")
 

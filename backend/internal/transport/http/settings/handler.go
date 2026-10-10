@@ -150,6 +150,8 @@ type settingsResponse struct {
 type providerBuildRecommendationDTO struct {
 	ClientVersion string `json:"clientVersion"`
 	UserAgent     string `json:"userAgent"`
+	// MinimumVersion 是当前生效的上游版本底线，可能因运行时自动学习而高于内置值。
+	MinimumVersion string `json:"minimumVersion"`
 }
 
 type updateRequest struct {
@@ -339,8 +341,9 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 			},
 		},
 		RecommendedProviderBuild: providerBuildRecommendationDTO{
-			ClientVersion: value.RecommendedProviderBuild.ClientVersion,
-			UserAgent:     value.RecommendedProviderBuild.UserAgent,
+			ClientVersion:  value.RecommendedProviderBuild.ClientVersion,
+			UserAgent:      value.RecommendedProviderBuild.UserAgent,
+			MinimumVersion: value.RecommendedProviderBuild.MinimumVersion,
 		},
 		UpdatedAt: value.UpdatedAt, Revision: value.Revision, RestartRequired: value.RestartRequired,
 	}

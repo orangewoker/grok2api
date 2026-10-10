@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
+	infraconfig "github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
@@ -968,6 +970,109 @@ func TestForwardResponseNeverSendsOutdatedClientVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
+}
+
+// TestForwardResponseRecoversFromUpstreamVersionGate proves the self-healing
+// path: when xAI raises its minimum client version, the gateway learns the new
+// requirement from the 426 body and retries successfully, instead of failing
+// every request until a new image is released.
+func TestForwardResponseRecoversFromUpstreamVersionGate(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: "1.0.40", ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli", UserAgent: "grok-shell/1.0.40 (linux; x86_64)"}, cipher)
+
+	// The upstream demands a version above the compiled-in recommendation, so
+	// only a learned floor can satisfy it.
+	const required = "8.8.8"
+	var calls atomic.Int32
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		attempt := calls.Add(1)
+		got := request.Header.Get("x-grok-client-version")
+		if attempt == 1 {
+			if got != "1.0.40" {
+				t.Fatalf("first attempt version = %q, want the configured 1.0.40", got)
+			}
+			body := `{"error":"Your Grok CLI version (1.0.40) is outdated. Please update to version ` + required + ` or later via grok update or the installation documentation."}`
+			return &http.Response{StatusCode: http.StatusUpgradeRequired, Status: "426 Upgrade Required", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+		}
+		if got != required {
+			t.Fatalf("retry version = %q, want the learned %q", got, required)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"resp_1"}`)), Request: request}, nil
+	})
+
+	response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+		Credential: account.Credential{Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, EncryptedAccessToken: encrypted},
+		Method:     http.MethodPost,
+		Path:       "/responses",
+		Body:       []byte(`{"model":"grok-4.5","input":"hi"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after learning the new floor", response.StatusCode)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls = %d, want exactly one retry", calls.Load())
+	}
+	// The learned floor must persist for subsequent requests on this process.
+	if got := infraconfig.ObservedBuildVersionFloor(); got != required {
+		t.Fatalf("observed floor = %q, want %q", got, required)
+	}
+}
+
+// TestForwardResponseKeepsOriginalBodyWhenLearnedVersionIsRejected ensures the
+// self-heal never fabricates success and never loops: if the learned version is
+// still refused, the caller receives the original 426 body.
+func TestForwardResponseKeepsOriginalBodyWhenLearnedVersionIsRejected(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: "1.0.40", ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli", UserAgent: "grok-shell/1.0.40 (linux; x86_64)"}, cipher)
+	const marker = "still refused by the version gate"
+	var calls atomic.Int32
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		body := `{"error":"Your Grok CLI version (1.0.40) is outdated. Please update to version 9.9.9 or later. ` + marker + `"}`
+		return &http.Response{StatusCode: http.StatusUpgradeRequired, Status: "426 Upgrade Required", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})
+	response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+		Credential: account.Credential{Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, EncryptedAccessToken: encrypted},
+		Method:     http.MethodPost,
+		Path:       "/responses",
+		Body:       []byte(`{"model":"grok-4.5","input":"hi"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUpgradeRequired {
+		t.Fatalf("status = %d, want the original 426", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), marker) {
+		t.Fatalf("body = %q, want the original upstream diagnostic", body)
+	}
+	// The retry must not loop: one original attempt plus a single retry.
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls = %d, want exactly one retry", calls.Load())
+	}
 }
 
 func TestForwardResponseDecodesExplicitGzipResponse(t *testing.T) {

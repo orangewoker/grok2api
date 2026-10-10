@@ -45,6 +45,9 @@ export function SettingsPage() {
   const buildClientVersion = form.watch("providerBuild.clientVersion");
   const buildUserAgent = form.watch("providerBuild.userAgent");
   const recommendedBuild = snapshot?.recommendedProviderBuild;
+  // The effective upstream floor may be higher than the compiled-in baseline
+  // when the gateway auto-learned a new requirement from a live 426.
+  const minimumBuildVersion = recommendedBuild?.minimumVersion;
   const recommendedBuildApplied = recommendedBuild != null
     && buildClientVersion === recommendedBuild.clientVersion
     && buildUserAgent === recommendedBuild.userAgent;
@@ -109,6 +112,7 @@ export function SettingsPage() {
               <SettingsField controlId="provider-base-url" className="sm:col-span-2" label={t("settings.provider.baseURL")} description={t("settings.provider.baseURLHelp")} error={form.formState.errors.providerBuild?.baseURL?.message}><Input id="provider-base-url" {...form.register("providerBuild.baseURL")} /></SettingsField>
               <SettingsField controlId="provider-fallback-base-url" className="sm:col-span-2" label={t("settings.provider.fallbackBaseURL")} description={t("settings.provider.fallbackBaseURLHelp")} error={form.formState.errors.providerBuild?.fallbackBaseURL?.message}><Input id="provider-fallback-base-url" {...form.register("providerBuild.fallbackBaseURL")} /></SettingsField>
               <SettingsField controlId="provider-client-version" label={t("settings.provider.clientVersion")} description={t("settings.provider.clientVersionHelp")} badge={recommendedBuild ? t("settings.provider.recommendedVersion", { version: recommendedBuild.clientVersion }) : undefined} error={form.formState.errors.providerBuild?.clientVersion?.message}><Input id="provider-client-version" {...form.register("providerBuild.clientVersion")} /></SettingsField>
+              {minimumBuildVersion ? <p className="text-xs text-muted-foreground" data-testid="provider-client-version-minimum">{t("settings.provider.minimumVersion", { version: minimumBuildVersion })}</p> : null}
               <SettingsField controlId="provider-client-identifier" label={t("settings.provider.clientIdentifier")} description={t("settings.provider.clientIdentifierHelp")} error={form.formState.errors.providerBuild?.clientIdentifier?.message}><Input id="provider-client-identifier" {...form.register("providerBuild.clientIdentifier")} /></SettingsField>
               <SettingsField controlId="provider-token-auth" label={t("settings.provider.tokenAuth")} description={t("settings.provider.tokenAuthHelp")} error={form.formState.errors.providerBuild?.tokenAuth?.message}><Input id="provider-token-auth" autoComplete="off" {...form.register("providerBuild.tokenAuth")} /></SettingsField>
               <SettingsField controlId="provider-user-agent" label={t("settings.provider.userAgent")} description={t("settings.provider.userAgentHelp")} error={form.formState.errors.providerBuild?.userAgent?.message}><Input id="provider-user-agent" {...form.register("providerBuild.userAgent")} /></SettingsField>

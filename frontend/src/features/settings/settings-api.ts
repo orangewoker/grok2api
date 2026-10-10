@@ -108,7 +108,7 @@ export type EgressUnhealthyCleanupPreviewDTO = { nodes: number; boundAccounts: n
 
 export type SettingsSnapshotDTO = {
   config: SettingsConfigDTO;
-  recommendedProviderBuild: { clientVersion: string; userAgent: string };
+  recommendedProviderBuild: { clientVersion: string; userAgent: string; minimumVersion?: string };
   updatedAt: string;
   revision: string;
   restartRequired: string[];
@@ -201,7 +201,7 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
 }
 const decodeSettingsSnapshotRaw = createObjectDecoder<SettingsSnapshotDTO>("settings", {
   config: settingsConfigValidator,
-  recommendedProviderBuild: hasShape({ clientVersion: isString, userAgent: isString }),
+  recommendedProviderBuild: hasShape({ clientVersion: isString, userAgent: isString, minimumVersion: isOptional(isString) }),
   updatedAt: isString,
   revision: isString,
   restartRequired: isArrayOf(isString),
